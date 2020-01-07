@@ -15,12 +15,13 @@ namespace daq
     };
 
     /**
-        * Вычисление длины вейвлет-фильтра по частоте искомого сигнала и частоте дискретизации АЦП на канал
-        * @param f Искомая частота сигнала
-        * @param rate Частота дискретизации АЦП
-        * @param width Константа 5
-        * @return Предварительный размер фильтра
-        */
+     * Вычисление длины вейвлет-фильтра по частоте искомого сигнала и частоте дискретизации АЦП на канал
+     * @param f Искомая частота сигнала
+     * @param rate Частота дискретизации АЦП
+     * @param width Константа 5
+     * @return Предварительный размер фильтра
+     */
+
     int ricker_filter_size(double f, double rate, double width = 5.0)
     {
         constexpr double ricker_coefficient = 2.2508;
@@ -49,7 +50,6 @@ namespace daq
             const double pow_t_2 = pow (t, 2);
             mh_filter.data[i] = c * exp(-pow_t_2 / 2) * (1 - pow_t_2);
             t += one_per_mh_dots;
-            std::cout << (double)mh_filter.data[i] << std::endl;
         }
 
         mh_filter.sz = dots;
