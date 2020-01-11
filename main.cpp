@@ -108,7 +108,6 @@ namespace daq
                              },
                              tw::make_value_task (std::make_tuple(to - from, array_pureS)), tw::make_value_task(index)
         );
-
     }
 
     static std::shared_ptr<tw::task<void>> gather_task(signal_sequence_type const & array_pureS, size_t from, size_t to,
@@ -130,17 +129,6 @@ namespace daq
             }}, vec);
     }
 
-    enum class calc_variant
-    {
-        uniprocessor = 0,
-        multi,
-        gcc_experimental
-    };
-
-    using uniprocessor_calling_type = std::integral_constant<calc_variant, calc_variant::uniprocessor>;
-    using gcc_experimental_calling_type = std::integral_constant<calc_variant, calc_variant::gcc_experimental>;
-    using multi_calling_type = std::integral_constant<calc_variant, calc_variant::multi>;
-
     auto inner_product_lambda = [](auto&&... args){return std::inner_product(decltype(args)(args)...);};
     auto parallel_inner_product_lambda = [](auto&&... args){return __gnu_parallel::inner_product(decltype(args)(args)...);};
 
@@ -158,22 +146,31 @@ namespace daq
         }
     }
 
-    void transform(uniprocessor_calling_type, signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data)
+    void transform_uni(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data)
     {
         seq_transform (ss, result, filter_data, inner_product_lambda);
     }
 
-    void transform (gcc_experimental_calling_type, signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data)
+    void transform_omp (signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data)
     {
         seq_transform (ss, result, filter_data, parallel_inner_product_lambda);
     }
 
-    void transform(multi_calling_type, signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data)
+    void transform_tw(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data)
     {
         auto final_task = gather_task(ss, 0, static_cast<size_t>(rate), result, filter_data);
         final_task->schedule_all(get_executor());
         final_task->get();
     }
+}
+
+template <typename F, typename ...T>
+void measure_it(char const* f_name, F const & f, T &&... arguments)
+{
+    auto const time_point1 = std::chrono::high_resolution_clock::now();
+    f (std::forward<T>(arguments)...);
+    auto const time_point2 = std::chrono::high_resolution_clock::now();
+    std::cout << f_name << std::chrono::duration_cast<std::chrono::milliseconds>(time_point2-time_point1).count() << std::endl;
 }
 
 int main()
@@ -191,9 +188,9 @@ int main()
 
     boost::shared_array<transform_result_type> wavelet_transform {new transform_result_type[static_cast<size_t>(rate)]{0}};
 
-    transform(uniprocessor_calling_type(), ss, &wavelet_transform[0], filter);
-    transform(gcc_experimental_calling_type(), ss, &wavelet_transform[0], filter);
-    transform(multi_calling_type(), ss, &wavelet_transform[0], filter);
+    measure_it("transform_uni: ", transform_uni, ss, wavelet_transform.get(), filter);
+    measure_it("transform_omp: ", transform_omp, ss, wavelet_transform.get(), filter);
+    measure_it("transform_tw:  ", transform_tw, ss, wavelet_transform.get(), filter);
 
     return 0;
 }
