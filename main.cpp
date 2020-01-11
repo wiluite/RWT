@@ -63,10 +63,10 @@ namespace daq
 
     output_type partial_task(prepare_type input, uint8_t part_index, uint8_t part_number, ricker_filter_data const & rfd)
     {
-        auto const element_number = std::get<0>(input);
+        auto const sample_quantity = std::get<0>(input);
         auto const & signal_sequence = std::get<1>(input);
 
-        auto const default_iteration_number = element_number / part_number;
+        auto const default_iteration_number = sample_quantity / part_number;
         auto const begin_iter = std::begin(signal_sequence) + ((part_index - 1) * default_iteration_number);
         auto const end_iter = (part_index != part_number) ? (std::begin(signal_sequence) + ((part_index) * default_iteration_number + rfd.sz)) : std::end(signal_sequence);
 
@@ -76,8 +76,8 @@ namespace daq
         std::copy (begin_iter, end_iter, signal_subsequence);
         std::copy (std::begin(rfd.data), std::begin(rfd.data) + rfd.sz, filter);
 
-        auto const total_iterations = (part_index != part_number) ? (element_number / part_number) : (element_number / part_number + (element_number % part_number));
-        const auto data = std::make_shared<std::vector<transform_result_type>>(total_iterations);
+        auto const total_iterations = (part_index != part_number) ? (sample_quantity / part_number) : (sample_quantity / part_number + (sample_quantity % part_number));
+        auto const data = std::make_shared<std::vector<transform_result_type>>(total_iterations);
 
         auto curr = std::begin(*data);
         auto const end = curr + total_iterations;
@@ -100,24 +100,26 @@ namespace daq
         return executor;
     }
 
-    static std::shared_ptr<tw::task<output_type>> make_task_by_index (uint8_t index, signal_sequence_type const & array_pureS, size_t from, size_t to, ricker_filter_data const & fd)
+    static std::shared_ptr<tw::task<output_type>> make_task_by_index (uint8_t index, signal_sequence_type const & ss, size_t from, size_t to, ricker_filter_data const & fd)
     {
         return tw::make_task(tw::consume, [&] (prepare_type input, uint8_t index)
                              {
                                  return partial_task(input, index, hardware_threads, fd);
                              },
-                             tw::make_value_task (std::make_tuple(to - from, array_pureS)), tw::make_value_task(index)
+                             tw::make_value_task (std::make_tuple(to - from, ss)), tw::make_value_task(index)
         );
     }
 
-    static std::shared_ptr<tw::task<void>> gather_task(signal_sequence_type const & array_pureS, size_t from, size_t to,
+    static std::shared_ptr<tw::task<void>> gather_task(signal_sequence_type const & ss, size_t from, size_t to,
                                                        transform_result_type * const result, ricker_filter_data const & filter_data) {
 
         std::vector<std::shared_ptr<tw::task<output_type>>> vec (hardware_threads);
-        for (int i = 0; i < hardware_threads; ++i)
-        {
-            vec[i] = make_task_by_index(static_cast<uint8_t>(i + 1), array_pureS, from, to, filter_data);
-        }
+        uint8_t curr_idx = 0;
+        std::for_each(std::begin(vec), std::end(vec), [&](std::shared_ptr<tw::task<output_type>> & elem)
+                      {
+                          elem = make_task_by_index(static_cast<uint8_t>(++curr_idx), ss, from, to, filter_data);
+                      }
+        );
 
         // capture by value
         return tw::make_task(tw::consume, [=](std::vector<output_type> const & parents) {
