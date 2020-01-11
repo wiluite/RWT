@@ -33,11 +33,3 @@
 build
 cmake*
 .idea*
-*algo*
-adc_alg_types*
-adc_slice_iter*
-adc_types*
-init_logs*
-log_wrapper*
-shared_data*
-enable_if_t_*

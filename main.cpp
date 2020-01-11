@@ -195,12 +195,6 @@ int main()
     transform(gcc_experimental_calling_type(), ss, &wavelet_transform[0], filter);
     transform(multi_calling_type(), ss, &wavelet_transform[0], filter);
 
-//    for (int i = 0; i != rate; ++i)
-//    {
-//        std::cout << /*std::setprecision(9) <<*/ wavelet_transform[i] << std::endl;
-//    }
-//
-//    std::cout << filter.sz << std::endl;
     return 0;
 }
 
