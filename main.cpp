@@ -2,7 +2,6 @@
 #include <iostream>
 #include <boost/math/constants/constants.hpp>
 #include <parallel/numeric>
-#include <boost/shared_array.hpp>
 
 namespace daq
 {
@@ -180,6 +179,8 @@ std::array<daq::transform_result_type, static_cast<size_t>(daq::rate)> transform
 std::array<daq::transform_result_type, static_cast<size_t>(daq::rate)> transform_omp_result{};
 std::array<daq::transform_result_type, static_cast<size_t>(daq::rate)> transform_tw_result{};
 
+
+#ifndef MAIN_IS_ABSENT
 int main()
 {
     using namespace daq;
@@ -198,4 +199,4 @@ int main()
     measure_it("transform_tw:  ", transform_tw, ss, std::addressof(transform_tw_result[0]), filter);
     return 0;
 }
-
+#endif

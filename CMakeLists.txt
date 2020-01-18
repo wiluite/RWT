@@ -14,4 +14,8 @@ add_definitions( -fopenmp)
 include(external/external.cmake)
 
 add_executable(sample main.cpp)
-target_link_libraries (sample ${Boost_LIBRARIES}  -lgomp)
+target_link_libraries (sample ${Boost_LIBRARIES} -lgomp)
+
+add_executable(test_app test.cpp)
+target_link_libraries (test_app ${Boost_LIBRARIES} -lgomp  )
+add_test (test_app test_app)
