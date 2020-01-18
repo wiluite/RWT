@@ -29,12 +29,12 @@ namespace daq
     constexpr size_t ricker_filter_max_size = 20000;
     using ricker_filter_data_type = std::array<double, ricker_filter_max_size + 1>;
 
-    struct ricker_filter_data {
+    struct ricker_filter {
         ricker_filter_data_type& data;
         size_t& sz;
     };
 
-    void create_filter(int dots, ricker_filter_data & rfd) noexcept
+    void create_filter(int dots, ricker_filter & rfd) noexcept
     {
         assert (rfd.data.size() > dots);
 
@@ -61,7 +61,7 @@ namespace daq
     using prepare_type = std::tuple<sample_quantity_type, const signal_sequence_type &>;
     using output_type = std::shared_ptr<std::vector<transform_result_type>>;
 
-    output_type partial_task(prepare_type input, uint8_t part_index, uint8_t part_number, ricker_filter_data const & rfd)
+    output_type partial_task(prepare_type input, uint8_t part_index, uint8_t part_number, ricker_filter const & rfd)
     {
         auto const sample_quantity = std::get<0>(input);
         auto const & signal_sequence = std::get<1>(input);
@@ -100,7 +100,7 @@ namespace daq
         return executor;
     }
 
-    static std::shared_ptr<tw::task<output_type>> make_task_by_index (uint8_t index, signal_sequence_type const & ss, size_t from, size_t to, ricker_filter_data const & fd)
+    static std::shared_ptr<tw::task<output_type>> make_task_by_index (uint8_t index, signal_sequence_type const & ss, size_t from, size_t to, ricker_filter const & fd)
     {
         return tw::make_task(tw::consume, [&] (prepare_type input, uint8_t index)
                              {
@@ -111,31 +111,32 @@ namespace daq
     }
 
     static std::shared_ptr<tw::task<void>> gather_task(signal_sequence_type const & ss, size_t from, size_t to,
-                                                       transform_result_type * const result, ricker_filter_data const & filter_data) {
+                                                       transform_result_type * const result, ricker_filter const & filter_data) {
 
         std::vector<std::shared_ptr<tw::task<output_type>>> vec (hardware_threads);
-        uint8_t curr_idx = 0;
-        std::for_each(std::begin(vec), std::end(vec), [&](std::shared_ptr<tw::task<output_type>> & elem)
-                      {
-                          elem = make_task_by_index(static_cast<uint8_t>(++curr_idx), ss, from, to, filter_data);
-                      }
-        );
+        uint8_t task_idx = 1;
+        for (auto & elem : vec)
+        {
+            elem = make_task_by_index(static_cast<uint8_t>(task_idx++), ss, from, to, filter_data);
+        }
 
         // capture by value
         return tw::make_task(tw::consume, [=](std::vector<output_type> const & parents) {
             size_t copy_pos = 0;
-            for (int i = 0; i < hardware_threads; ++i)
+            for (auto & elem : parents)
             {
-                std::copy (parents[i]->begin(), parents[i]->begin()+parents[i]->size(), &result[copy_pos]);
-                copy_pos += parents[i]->size();
-            }}, vec);
+                std::copy (elem->begin(), elem->begin()+elem->size(), &result[copy_pos]);
+                copy_pos += elem->size();
+            }
+        }, vec);
+
     }
 
     auto inner_product_lambda = [](auto&&... args){return std::inner_product(decltype(args)(args)...);};
     auto parallel_inner_product_lambda = [](auto&&... args){return __gnu_parallel::inner_product(decltype(args)(args)...);};
 
     template <typename L>
-    inline void seq_transform(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data, L const & lambda)
+    inline void seq_transform(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter const & filter_data, L const & lambda)
     {
         auto const iterations = static_cast<size_t>(rate);
         int curr_iteration = 0;
@@ -148,17 +149,17 @@ namespace daq
         }
     }
 
-    void transform_uni(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data)
+    void transform_uni(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter const & filter_data)
     {
         seq_transform (ss, result, filter_data, inner_product_lambda);
     }
 
-    void transform_omp (signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data)
+    void transform_omp (signal_sequence_type const & ss, transform_result_type * const result, ricker_filter const & filter_data)
     {
         seq_transform (ss, result, filter_data, parallel_inner_product_lambda);
     }
 
-    void transform_tw(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter_data const & filter_data)
+    void transform_tw(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter const & filter_data)
     {
         auto final_task = gather_task(ss, 0, static_cast<size_t>(rate), result, filter_data);
         final_task->schedule_all(get_executor());
@@ -175,25 +176,26 @@ void measure_it(char const* f_name, F const & f, T &&... arguments)
     std::cout << f_name << std::chrono::duration_cast<std::chrono::milliseconds>(time_point2-time_point1).count() << std::endl;
 }
 
+std::array<daq::transform_result_type, static_cast<size_t>(daq::rate)> transform_uni_result{};
+std::array<daq::transform_result_type, static_cast<size_t>(daq::rate)> transform_omp_result{};
+std::array<daq::transform_result_type, static_cast<size_t>(daq::rate)> transform_tw_result{};
+
 int main()
 {
     using namespace daq;
 
     ricker_filter_data_type filter_data {};
     size_t filter_size {};
-    ricker_filter_data filter {filter_data, filter_size};
+    ricker_filter filter {filter_data, filter_size};
 
     create_filter (make_odd(align_by_ten(ricker_filter_size(f, rate))), filter);
 
     signal_sequence_type ss (static_cast<size_t>(rate) + filter.sz);
     std::iota(std::begin(ss), std::end(ss), -rate/2);
 
-    boost::shared_array<transform_result_type> wavelet_transform {new transform_result_type[static_cast<size_t>(rate)]{0}};
-
-    measure_it("transform_uni: ", transform_uni, ss, wavelet_transform.get(), filter);
-    measure_it("transform_omp: ", transform_omp, ss, wavelet_transform.get(), filter);
-    measure_it("transform_tw:  ", transform_tw, ss, wavelet_transform.get(), filter);
-
+    measure_it("transform_uni: ", transform_uni, ss, std::addressof(transform_uni_result[0]), filter);
+    measure_it("transform_omp: ", transform_omp, ss, std::addressof(transform_omp_result[0]), filter);
+    measure_it("transform_tw:  ", transform_tw, ss, std::addressof(transform_tw_result[0]), filter);
     return 0;
 }
 
