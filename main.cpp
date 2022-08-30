@@ -1,202 +1,114 @@
-#include <transwarp.h>
-#include <iostream>
-#include <boost/math/constants/constants.hpp>
-#include <parallel/numeric>
+#include "detail/rwt_omp.h"
+#include <random>
 
-namespace daq
-{
-    constexpr double f = 15.0;       // Hz
-    constexpr double rate = 95000.0; // Hz
+constexpr double f = 15.0;
+constexpr double rate = 95000;
 
-    int ricker_filter_size(double f_, double rate_, double width = 5.0) noexcept
+std::array<detail::rwt::transform_result_type, static_cast<size_t>(rate)> transform_uni_result, transform_omp_result, transform_tw_result, transform_honest_omp_result;
+
+using namespace detail;
+using namespace detail::rwt;
+
+ struct compare_repeat_strategy{
+    compare_repeat_strategy(size_t iter_cnt, size_t iterations, ricker_filter const & filter, signal_sequence_type const & ss) :
+    iter_cnt_(iter_cnt), iterations_(iterations), filter_(filter), ss_(ss) {}
+
+    void process()
     {
-        constexpr double ricker_coefficient = 2.2508;
-        return static_cast<int>(lround (width / ricker_coefficient / f_ * rate_ + 0.5));
-    }
-
-    // TODO: Improve make_odd(), align_by_ten(), ricker_filter_size() functions to do a simmetrical filter without sly tricks
-    int align_by_ten(int sz) noexcept
-    {
-        return sz / 10 * 10 + 10;
-    }
-
-    int make_odd(int sz) noexcept
-    {
-        return (sz % 2) ? sz : (sz + 1);
-    }
-
-    constexpr size_t ricker_filter_max_size = 20000;
-    using ricker_filter_data_type = std::array<double, ricker_filter_max_size + 1>;
-
-    struct ricker_filter {
-        ricker_filter_data_type& data;
-        size_t& sz;
-    };
-
-    void create_filter(int dots, ricker_filter & rfd) noexcept
-    {
-        assert (rfd.data.size() > dots);
-
-        auto const tricky_dots = (dots - 1) / 10;
-        double const c = 2 / ((sqrt (3)) * pow (boost::math::constants::pi<double>(), 0.25));
-        double const one_per_mh_dots = 1.0 / tricky_dots;
-        double t = -5.0;
-
-        for (int i = 0; i < dots; ++i)
+        while (iter_cnt_--)
         {
-            const double pow_t_2 = pow (t, 2);
-            rfd.data[i] = c * exp(-pow_t_2 / 2) * (1 - pow_t_2);
-            t += one_per_mh_dots;
-        }
-
-        rfd.sz = dots;
-    }
-
-    using sample_type = int32_t;
-    using signal_sequence_type = std::vector<sample_type>;
-    using transform_result_type = double;
-
-    using sample_quantity_type = int;
-    using prepare_type = std::tuple<sample_quantity_type, const signal_sequence_type &>;
-    using output_type = std::shared_ptr<std::vector<transform_result_type>>;
-
-    output_type partial_task(prepare_type input, uint8_t part_index, uint8_t part_number, ricker_filter const & rfd)
-    {
-        auto const sample_quantity = std::get<0>(input);
-        auto const & signal_sequence = std::get<1>(input);
-
-        auto const default_iteration_number = sample_quantity / part_number;
-        auto const begin_iter = std::begin(signal_sequence) + ((part_index - 1) * default_iteration_number);
-        auto const end_iter = (part_index != part_number) ? (std::begin(signal_sequence) + ((part_index) * default_iteration_number + rfd.sz)) : std::end(signal_sequence);
-
-        sample_type signal_subsequence [std::distance(begin_iter, end_iter)];
-        ricker_filter_data_type::value_type filter [rfd.sz];
-
-        std::copy (begin_iter, end_iter, signal_subsequence);
-        std::copy (std::begin(rfd.data), std::begin(rfd.data) + rfd.sz, filter);
-
-        auto const total_iterations = (part_index != part_number) ? (sample_quantity / part_number) : (sample_quantity / part_number + (sample_quantity % part_number));
-        auto const data = std::make_shared<std::vector<transform_result_type>>(total_iterations);
-
-        auto curr = std::begin(*data);
-        auto const end = curr + total_iterations;
-
-        auto pure_s_iter = signal_subsequence;
-
-        while (curr != end)
-        {
-            *curr++ = static_cast<transform_result_type>(std::inner_product(filter, filter + rfd.sz, pure_s_iter++, 0.0) / rfd.sz);
-        }
-
-        return data;
-    }
-
-    namespace tw = transwarp;
-    constexpr int hardware_threads = 8; /*std::thread::hardware_concurrency();*/
-    tw::parallel & get_executor()
-    {
-        static tw::parallel executor(hardware_threads);
-        return executor;
-    }
-
-    static std::shared_ptr<tw::task<output_type>> make_task_by_index (uint8_t index, signal_sequence_type const & ss, size_t from, size_t to, ricker_filter const & fd)
-    {
-        return tw::make_task(tw::consume, [&] (prepare_type input, uint8_t index)
-                             {
-                                 return partial_task(input, index, hardware_threads, fd);
-                             },
-                             tw::make_value_task (std::make_tuple(to - from, ss)), tw::make_value_task(index)
-        );
-    }
-
-    static std::shared_ptr<tw::task<void>> gather_task(signal_sequence_type const & ss, size_t from, size_t to,
-                                                       transform_result_type * const result, ricker_filter const & filter_data) {
-
-        std::vector<std::shared_ptr<tw::task<output_type>>> vec (hardware_threads);
-        uint8_t task_idx = 1;
-        for (auto & elem : vec)
-        {
-            elem = make_task_by_index(static_cast<uint8_t>(task_idx++), ss, from, to, filter_data);
-        }
-
-        // capture by value
-        return tw::make_task(tw::consume, [=](std::vector<output_type> const & parents) {
-            size_t copy_pos = 0;
-            for (auto & elem : parents)
-            {
-                std::copy (elem->begin(), elem->begin()+elem->size(), &result[copy_pos]);
-                copy_pos += elem->size();
+            if (iter_cnt_ % 2) {
+                times_sums[0] += measure_it("transform-tw:  ", transform_tw, ss_,
+                                            std::addressof(transform_tw_result[0]), filter_);
+                times_sums[1] += measure_it("transform-honest-omp: ", transform_honest_omp, ss_,
+                                            std::addressof(transform_honest_omp_result[0]), filter_);
+            } else {
+                times_sums[1] += measure_it("transform-honest-omp: ", transform_honest_omp, ss_,
+                                            std::addressof(transform_honest_omp_result[0]), filter_);
+                times_sums[0] += measure_it("transform-tw:  ", transform_tw, ss_,
+                                            std::addressof(transform_tw_result[0]), filter_);
             }
-        }, vec);
-
+        }
+        std::cout << "Average:\n";
+        std::cout << "tw:  " << times_sums[0] / iterations_ << '\n';
+        std::cout << "honest_omp: " << times_sums[1] / iterations_ << '\n';
     }
+ private:
+    size_t iter_cnt_;
+    size_t iterations_;
+    signal_sequence_type const & ss_;
+    ricker_filter const & filter_;
+    std::array<decltype(std::chrono::duration_cast<std::chrono::milliseconds>
+             (std::chrono::high_resolution_clock::now() - std::chrono::high_resolution_clock::now()).count()), 2> times_sums {};
 
-    auto inner_product_lambda = [](auto&&... args){return std::inner_product(decltype(args)(args)...);};
-    auto parallel_inner_product_lambda = [](auto&&... args){return __gnu_parallel::inner_product(decltype(args)(args)...);};
+};
 
-    template <typename L>
-    inline void seq_transform(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter const & filter_data, L const & lambda)
+struct vacation_tw_repeat_strategy {
+    vacation_tw_repeat_strategy (size_t iter_cnt, ricker_filter const & filter, signal_sequence_type const & ss) :
+    iter_cnt_(iter_cnt), filter_(filter), ss_(ss) {}
+    void process()
     {
-        auto const iterations = static_cast<size_t>(rate);
-        int curr_iteration = 0;
-        while (curr_iteration < iterations)
+        while (iter_cnt_--)
         {
-            result[curr_iteration] = static_cast<transform_result_type> (
-                    lambda(std::begin(filter_data.data), std::begin(filter_data.data) + filter_data.sz, std::begin(ss) + curr_iteration, 0.0) / filter_data.sz
-            );
-            ++curr_iteration;
+            if (iter_cnt_ % 2) {
+                auto const newtime = measure_it("transform-tw:  ", transform_tw,  ss_, std::addressof(transform_tw_result[0]),  filter_);
+                if (newtime < 1000)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000-newtime));
+            } else {
+                auto const newtime = measure_it("transform-tw:  ", transform_tw,  ss_, std::addressof(transform_tw_result[0]),  filter_);
+                if (newtime < 1000)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000-newtime));
+            }
         }
     }
+private:
+    size_t iter_cnt_;
+    signal_sequence_type const & ss_;
+    ricker_filter const & filter_;
+};
 
-    void transform_uni(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter const & filter_data)
-    {
-        seq_transform (ss, result, filter_data, inner_product_lambda);
-    }
-
-    void transform_omp (signal_sequence_type const & ss, transform_result_type * const result, ricker_filter const & filter_data)
-    {
-        seq_transform (ss, result, filter_data, parallel_inner_product_lambda);
-    }
-
-    void transform_tw(signal_sequence_type const & ss, transform_result_type * const result, ricker_filter const & filter_data)
-    {
-        auto final_task = gather_task(ss, 0, static_cast<size_t>(rate), result, filter_data);
-        final_task->schedule_all(get_executor());
-        final_task->get();
-    }
-}
-
-template <typename F, typename ...T>
-void measure_it(char const* f_name, F const & f, T &&... arguments)
+int main(int argc, char* argv[])
 {
-    auto const time_point1 = std::chrono::high_resolution_clock::now();
-    f (std::forward<T>(arguments)...);
-    auto const time_point2 = std::chrono::high_resolution_clock::now();
-    std::cout << f_name << std::chrono::duration_cast<std::chrono::milliseconds>(time_point2-time_point1).count() << std::endl;
-}
+    if (argc != 2)
+    {
+        std::cout << argv[0] << " <number>\n";
+        exit(1);
+    }
 
-std::array<daq::transform_result_type, static_cast<size_t>(daq::rate)> transform_uni_result{};
-std::array<daq::transform_result_type, static_cast<size_t>(daq::rate)> transform_omp_result{};
-std::array<daq::transform_result_type, static_cast<size_t>(daq::rate)> transform_tw_result{};
+    size_t iter_cnt, iterations;
+    try {
+        iter_cnt = iterations = std::stoi(std::string(argv[1]));
+    } catch (std::invalid_argument const & e)
+    {
+        std::cout << e.what() << '\n';
+        exit(1);
+    }
 
+    ricker_filter filter{};
+    try {
+        filter = create_filter (make_odd(align_by_ten(ricker_filter_size(f, rate))));
+    } catch (std::exception const & e)
+    {
+        std::cout << e.what() << '\n';
+        return 1;
+    }
 
-#ifndef MAIN_IS_ABSENT
-int main()
-{
-    using namespace daq;
+    signal_sequence_type ss (static_cast<size_t>(rate) + filter.actual_sz);
+    std::mt19937 rng;
+    std::generate_n(std::begin(ss), std::distance(std::begin(ss), std::end(ss)), rng);
 
-    ricker_filter_data_type filter_data {};
-    size_t filter_size {};
-    ricker_filter filter {filter_data, filter_size};
-
-    create_filter (make_odd(align_by_ten(ricker_filter_size(f, rate))), filter);
-
-    signal_sequence_type ss (static_cast<size_t>(rate) + filter.sz);
-    std::iota(std::begin(ss), std::end(ss), -rate/2);
-
-    measure_it("transform_uni: ", transform_uni, ss, std::addressof(transform_uni_result[0]), filter);
-    measure_it("transform_omp: ", transform_omp, ss, std::addressof(transform_omp_result[0]), filter);
-    measure_it("transform_tw:  ", transform_tw, ss, std::addressof(transform_tw_result[0]), filter);
+#if 1
+    measure_it("transform-uni:         ", transform_uni, ss, std::addressof(transform_uni_result[0]), filter);
+#endif
+#if 0
+    measure_it("transform-omp:         ", transform_omp, ss, std::addressof(transform_omp_result[0]), filter);
+    measure_it("transform-tw:          ", transform_tw, ss, std::addressof(transform_tw_result[0]), filter);
+    measure_it("transform-honest-omp:  ", transform_honest_omp, ss, std::addressof(transform_honest_omp_result[0]), filter);
+#else
+    compare_repeat_strategy rs (iter_cnt, iterations, filter, ss);
+    //vacation_tw_repeat_strategy rs (iter_cnt, filter, ss);
+    rs.process();
+#endif
     return 0;
 }
-#endif
+
